@@ -1,7 +1,7 @@
 import re
 import json
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 import os
 
 def extract_task_hint(litellm_request: str) -> str:
@@ -50,8 +50,19 @@ def extract_task_hint(litellm_request: str) -> str:
     # If all else fails
     return "Unknown Task"
 
-def extract_token_usage(raw_text: str) -> Dict:
-    """Extract token usage information with multiple approaches."""
+def extract_token_usage(raw_text: str) -> Dict[str, int]:
+    """Extract token usage information from raw response text using multiple approaches.
+    
+    This function tries several methods to extract token usage information from the
+    raw response text, including JSON parsing, regex matching, and line-by-line scanning.
+    
+    Args:
+        raw_text: The raw response text from the API call
+        
+    Returns:
+        A dictionary containing prompt_tokens, completion_tokens, and total_tokens,
+        or an empty dictionary if no token information could be found
+    """
     # First look for the standard usage format
     usage_match = re.search(r'"usage":\s*({[^}]*"prompt_tokens":[^}]*"completion_tokens":[^}]*"total_tokens":[^}]*})', raw_text, re.DOTALL)
     if usage_match:
@@ -109,7 +120,17 @@ def extract_token_usage(raw_text: str) -> Dict:
     return {}
 
 def extract_model_name(text: str) -> str:
-    """Extract the model name from the text."""
+    """Extract the model name from the text.
+    
+    This function uses multiple regex patterns to find the model name in the text,
+    handling different formats and patterns.
+    
+    Args:
+        text: The text to extract the model name from
+        
+    Returns:
+        The extracted model name, or "unknown" if not found
+    """
     patterns = [
         r'model="([^"]+)"',
         r"model='([^']+)'",
@@ -125,13 +146,36 @@ def extract_model_name(text: str) -> str:
     return "unknown"
 
 def slugify_filename(text: str) -> str:
-    """Create a filesystem-safe filename from task hint."""
+    """Create a filesystem-safe filename from task hint.
+    
+    This function converts a task hint into a safe filename by replacing
+    non-alphanumeric characters with underscores and truncating to a reasonable length.
+    
+    Args:
+        text: The text to convert to a safe filename
+        
+    Returns:
+        A filesystem-safe filename
+    """
     if not text or text == "Unknown Task":
         return "unknown_task"
     return re.sub(r'[^a-zA-Z0-9_-]', '_', text)[:80]
 
-def parse_log_file_v2(log_path: str, verbose=False) -> Tuple[List[Dict], List[Dict]]:
-    """Parse CrewAI log file into structured LLM call blocks and token usage."""
+def parse_log_file_v2(log_path: str, verbose: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Parse CrewAI log file into structured LLM call blocks and token usage.
+    
+    This function reads a CrewAI log file and extracts information about each LLM call,
+    including the request, response, token usage, and other metadata.
+    
+    Args:
+        log_path: Path to the CrewAI log file
+        verbose: Whether to print verbose output during parsing
+        
+    Returns:
+        A tuple containing:
+        - A list of dictionaries, each representing a parsed LLM call block
+        - A list of dictionaries containing token usage information for each block
+    """
     lines = Path(log_path).read_text().splitlines()
     blocks = []
     token_usage_info = []
@@ -140,9 +184,13 @@ def parse_log_file_v2(log_path: str, verbose=False) -> Tuple[List[Dict], List[Di
 
     for idx, line in enumerate(lines):
         if "Request to litellm:" in line:
-            # Get timestamp if available
-            timestamp = None
+            # Set end_time of previous block to this timestamp
             timestamp_match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
+            if timestamp_match and current_block:
+                current_block['end_time'] = timestamp_match.group(1)
+            
+            # Get timestamp if available for new block
+            timestamp = None
             if timestamp_match:
                 timestamp = timestamp_match.group(1)
             
@@ -165,6 +213,10 @@ def parse_log_file_v2(log_path: str, verbose=False) -> Tuple[List[Dict], List[Di
             inside_request = True
             inside_response = False
             current_block['litellm_request'] += line + '\n'
+        elif "response_cost:" in line and current_block:
+            cost_match = re.search(r"response_cost:\s*([0-9.]+)", line)
+            if cost_match:
+                current_block['cost_usd'] = float(cost_match.group(1))
         elif "RAW RESPONSE:" in line and current_block:
             inside_response = True
             inside_request = False
@@ -201,6 +253,13 @@ def parse_log_file_v2(log_path: str, verbose=False) -> Tuple[List[Dict], List[Di
             if verbose:
                 print(f"Found token usage for block {idx}: {usage}")
             
+            # Calculate cost
+            cost = (usage.get('prompt_tokens', 0) * 1.5e-07) + (usage.get('completion_tokens', 0) * 6e-07)
+            
+            # Add cost to the parsed_usage dictionary
+            usage['cost_usd'] = cost
+            
+            # Set the parsed_usage in the block
             block['parsed_usage'] = usage
             
             # Add token usage info to the collection
@@ -209,12 +268,9 @@ def parse_log_file_v2(log_path: str, verbose=False) -> Tuple[List[Dict], List[Di
                 'model': block['model'],
                 'prompt_tokens': usage.get('prompt_tokens', 0),
                 'completion_tokens': usage.get('completion_tokens', 0),
-                'total_tokens': usage.get('total_tokens', 0)
+                'total_tokens': usage.get('total_tokens', 0),
+                'cost_usd': cost
             }
-            
-            # Calculate cost
-            cost = (usage.get('prompt_tokens', 0) * 1.5e-07) + (usage.get('completion_tokens', 0) * 6e-07)
-            token_info['cost_usd'] = cost
             
             token_usage_info.append(token_info)
         
@@ -261,8 +317,18 @@ def parse_log_file_v2(log_path: str, verbose=False) -> Tuple[List[Dict], List[Di
 
     return blocks, token_usage_info
 
-def save_analysis(blocks: List[Dict], output_dir: str, verbose=False):
-    """Save each LLM call's input and output to a file."""
+def save_analysis(blocks: List[Dict[str, Any]], output_dir: str, verbose: bool = False) -> None:
+    """Save each LLM call's input and output to a file.
+    
+    This function saves the raw request and response for each LLM call to separate files
+    in the specified output directory. The files are named with a sequential number and
+    the task hint for easy identification.
+    
+    Args:
+        blocks: List of parsed LLM call blocks
+        output_dir: Directory to save the files to
+        verbose: Whether to print verbose output during saving
+    """
     os.makedirs(output_dir, exist_ok=True)
     saved_files = 0
     
@@ -285,8 +351,19 @@ def save_analysis(blocks: List[Dict], output_dir: str, verbose=False):
     if verbose:
         print(f"Successfully saved {saved_files} input/output pairs.")
 
-def extract_token_usage_v2(token_usage_info: List[Dict]):
-    """Extract token usage and cost into a DataFrame."""
+def extract_token_usage_v2(token_usage_info: List[Dict[str, Any]]) -> Any:
+    """Extract token usage and cost into a DataFrame.
+    
+    This function converts a list of token usage dictionaries into a pandas DataFrame
+    for easier analysis and visualization.
+    
+    Args:
+        token_usage_info: List of dictionaries containing token usage information
+        
+    Returns:
+        A pandas DataFrame containing token usage information, or an empty list if
+        pandas is not installed
+    """
     try:
         import pandas as pd
         if not token_usage_info:

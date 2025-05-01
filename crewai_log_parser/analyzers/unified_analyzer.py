@@ -1,161 +1,213 @@
+
 import pandas as pd
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set, Any
 from crewai_log_parser.models.parsed_block import ParsedBlock
-from collections import Counter
+from collections import Counter, defaultdict
 import re
+import logging
+
+logger = logging.getLogger(__name__)
+
 def extract_tool_name(action: str) -> str:
     """Extract clean tool name using regex."""
     if not action:
         return ""
-    
-    # Try to find everything before first '\n' or '('
     match = re.match(r"^(.*?)\s*(?:\\n|\()", action)
     if match:
         return match.group(1).strip()
-    
     return action.strip()
 
 def truncate_task_hint(hint: str, max_length: int = 40) -> str:
     """Truncate task hint to a reasonable length for display."""
     if not hint:
         return "Unknown Task"
-    
     if len(hint) > max_length:
         return hint[:max_length-3] + "..."
-    
     return hint
 
+# --- Function to normalize task hints for grouping ---
+def normalize_task_hint(hint: str, max_length: int = 50) -> str:
+    """Normalize and truncate task hint for grouping."""
+    if not hint:
+        return "Unknown Task"
+    normalized = hint.strip().lower()
+    normalized = re.sub(r"^\d+\.\s*", "", normalized)
+    normalized = re.sub(r"^task\s*\d*:\s*", "", normalized)
+    # Remove common prefixes/suffixes if needed
+    normalized = normalized.replace("**critical batch processing:**", "").strip()
+    normalized = normalized.replace("**critical merging task:**", "").strip()
+    normalized = normalized.replace("**critical naming task:**", "").strip()
+    normalized = normalized.replace("**critical final refinement task:**", "").strip()
+    # Use the *truncated* version for grouping to match display
+    return truncate_task_hint(normalized, max_length) # Group by the truncated hint
+
 def unified_analysis(blocks: List[ParsedBlock], verbose: bool = False) -> Optional[pd.DataFrame]:
-    """Generate a unified analysis table with all metrics for LLM calls."""
+    """Generate a unified analysis table with metrics grouped by task."""
     # Calculate response times first
-    times = []
+    times: List[tuple[ParsedBlock, datetime]] = []
+    prompt_token_cost: float = 1.5e-07
+    completion_token_cost: float = 6e-07
+
+    # Attempt to parse token costs from blocks if available
     for block in blocks:
-        if block.start_time: 
+        usage = block.parsed_usage or {}
+        if 'prompt_token_cost' in usage:
+            prompt_token_cost = usage['prompt_token_cost']
+        if 'completion_token_cost' in usage:
+            completion_token_cost = usage['completion_token_cost']
+        # Break early if both found
+        if prompt_token_cost != 1.5e-07 and completion_token_cost != 6e-07:
+            break
+
+    for block in blocks:
+        if block.start_time:
             try:
                 start_dt = datetime.strptime(block.start_time, "%Y-%m-%d %H:%M:%S")
                 times.append((block, start_dt))
             except Exception as e:
                 if verbose:
-                    print(f"Error processing timestamp: {e}")
+                    logger.error(f"Error processing timestamp: {e}")
                 continue
-    
     times.sort(key=lambda x: x[1])
-    
-    response_times = {}
+
+    response_times_map: Dict[ParsedBlock, float] = {}
     if len(times) >= 2:
         for i in range(1, len(times)):
-            block = times[i][0]
-            duration = (times[i][1] - times[i-1][1]).total_seconds()
-            response_times[block] = duration
-    
-    # Debug token usage if verbose mode
-    if verbose:
-        for idx, block in enumerate(blocks):
-            if block.parsed_usage:
-                print(f"Block {idx}: {block.parsed_usage}")
-            else:
-                print(f"Block {idx}: No token usage data")
-    
-    # Create data for unified table
-    data = []
-    for idx, block in enumerate(blocks):
-        # Truncate task hint for display
-        display_hint = truncate_task_hint(block.task_hint)
-            
-        # Get tokens if available
-        prompt_tokens = block.parsed_usage.get('prompt_tokens', 0) if block.parsed_usage else 0
-        completion_tokens = block.parsed_usage.get('completion_tokens', 0) if block.parsed_usage else 0
-        total_tokens = block.parsed_usage.get('total_tokens', 0) if block.parsed_usage else 0
-        
-        # Calculate cost
-        cost = 0
-        if prompt_tokens or completion_tokens:
-            cost = (prompt_tokens * 1.5e-07) + (completion_tokens * 6e-07)
-        
-        # Get response time
-        response_time = response_times.get(block, None)
-        
-        # Check for final answer
-        has_final_answer = "✅" if block.final_answer else "❌"
-        
-        # Get tool used
-        tool_used = extract_tool_name(block.action) if block.action else ""
-        
-        # Build the row
-        row = {
-            "Step": idx + 1,
-            "Task": display_hint,
-            "Model": block.model or "unknown",
-            "Prompt Tokens": prompt_tokens,
-            "Completion Tokens": completion_tokens, 
-            "Total Tokens": total_tokens,
-            "Cost (USD)": cost,
-            "Response Time (s)": response_time if response_time is not None else "",
-            "Final Answer": has_final_answer,
-            "Tool Used": tool_used
-        }
+            current_block, current_time = times[i]
+            prev_block, prev_time = times[i-1]
+            duration = (current_time - prev_time).total_seconds()
+            response_times_map[current_block] = duration
 
+    # --- Group blocks by normalized task hint and aggregate metrics ---
+    grouped_data: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "First Step": float('inf'),
+        "Models": set(),
+        "Prompt Tokens": 0,
+        "Completion Tokens": 0,
+        "Total Tokens": 0,
+        "Cost (USD)": 0.0,
+        "Total Response Time (s)": 0.0,
+        "Final Answers Count": 0,
+        "Block Count": 0,
+        "Tools": Counter(),
+        "Original Hint Sample": "" # Store one representative original hint
+    })
+
+    overall_tool_counter: Counter = Counter() # For the separate summary
+
+    for idx, block in enumerate(blocks):
+        # Use the *truncated* hint for grouping key, matching display
+        group_key = truncate_task_hint(block.task_hint)
+        group = grouped_data[group_key]
+
+        # Store the first step number encountered for this group
+        group["First Step"] = min(group["First Step"], idx + 1)
+        if not group["Original Hint Sample"]: # Keep the first hint encountered
+             group["Original Hint Sample"] = group_key
+
+        if block.model:
+            group["Models"].add(block.model)
+
+        usage = block.parsed_usage or {}
+        prompt_tokens = usage.get('prompt_tokens', 0)
+        completion_tokens = usage.get('completion_tokens', 0)
+        total_tokens = usage.get('total_tokens', 0)
+        cost = (prompt_tokens * prompt_token_cost) + (completion_tokens * completion_token_cost)
+
+        group["Prompt Tokens"] += prompt_tokens
+        group["Completion Tokens"] += completion_tokens
+        group["Total Tokens"] += total_tokens
+        group["Cost (USD)"] += cost
+
+        response_time = response_times_map.get(block)
+        if response_time is not None:
+            group["Total Response Time (s)"] += response_time
+
+        if block.final_answer:
+            group["Final Answers Count"] += 1
+        group["Block Count"] += 1
+
+        if block.action:
+            tool_name = extract_tool_name(block.action)
+            if tool_name:
+                group["Tools"][tool_name] += 1
+                overall_tool_counter[tool_name] += 1 # Update overall counter too
+
+    # --- Create DataFrame rows from aggregated data ---
+    data = []
+    # Sort groups based on the first step they appeared in
+    sorted_groups = sorted(grouped_data.items(), key=lambda item: item[1]["First Step"])
+
+    for task_key, metrics in sorted_groups:
+        model_str = ", ".join(sorted(list(metrics["Models"]))) if metrics["Models"] else "unknown"
+        # Format tool usage string for the row
+        tool_str = ", ".join(f"{tool}({count})" for tool, count in metrics["Tools"].most_common())
+
+        row = {
+            "Step": metrics["First Step"], # Show the first step number
+            "Task": metrics["Original Hint Sample"], # Use the representative truncated hint
+            "Model": model_str,
+            "Prompt Tokens": metrics["Prompt Tokens"],
+            "Completion Tokens": metrics["Completion Tokens"],
+            "Total Tokens": metrics["Total Tokens"],
+            "Cost (USD)": metrics["Cost (USD)"],
+            "Response Time (s)": metrics["Total Response Time (s)"] if metrics["Total Response Time (s)"] > 0 else "",
+            "Final Answer": f"{metrics['Final Answers Count']}/{metrics['Block Count']}", # Show as X/Y
+            "Tool Used": tool_str # Show aggregated tools for the group
+        }
         data.append(row)
-    
-    # Exit if no data
+
     if not data:
-        print("No data available for analysis.")
+        logger.warning("No data available for analysis.")
         return None
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(data)
-    
-    # Add a summary row with totals
+
+    # Convert aggregated data to DataFrame
+    df_grouped = pd.DataFrame(data)
+
+    # --- Calculate and add summary row ---
+    total_prompt = df_grouped["Prompt Tokens"].sum()
+    total_completion = df_grouped["Completion Tokens"].sum()
+    total_tokens_overall = df_grouped["Total Tokens"].sum()
+    total_cost = df_grouped["Cost (USD)"].sum()
+    # Sum response time correctly (handle empty strings)
+    total_response_time = pd.to_numeric(df_grouped["Response Time (s)"], errors='coerce').sum()
+    # Calculate total final answers and total blocks from the grouped data
+    final_answers_split = df_grouped['Final Answer'].str.split('/', expand=True)
+    total_final_answers = pd.to_numeric(final_answers_split[0], errors='coerce').sum()
+    total_blocks = pd.to_numeric(final_answers_split[1], errors='coerce').sum()
+
+
     summary = {
         "Step": "",
         "Task": "TOTAL",
         "Model": "",
-        "Prompt Tokens": df["Prompt Tokens"].sum(),
-        "Completion Tokens": df["Completion Tokens"].sum(),
-        "Total Tokens": df["Total Tokens"].sum(),
-        "Cost (USD)": df["Cost (USD)"].sum()
+        "Prompt Tokens": total_prompt,
+        "Completion Tokens": total_completion,
+        "Total Tokens": total_tokens_overall,
+        "Cost (USD)": total_cost,
+        "Response Time (s)": total_response_time if total_response_time > 0 else "",
+        "Final Answer": f"{int(total_final_answers)}/{int(total_blocks)}",
+        "Tool Used": ""
     }
-    
-    # Handle response time total
-    if any(isinstance(x, (int, float)) for x in df["Response Time (s)"]):
-        valid_times = [t for t in df["Response Time (s)"] if isinstance(t, (int, float))]
-        summary["Response Time (s)"] = sum(valid_times) if valid_times else ""
-    else:
-        summary["Response Time (s)"] = ""
-    
-    # Handle final answer count
-    check_count = df["Final Answer"].value_counts().get("✅", 0)
-    summary["Final Answer"] = f"{check_count}/{len(df)}"
-    
-    # No tool summary
-    summary["Tool Used"] = ""
-    
-    # Add summary row
-    df = pd.concat([df, pd.DataFrame([summary])], ignore_index=True)
-    
-    # Print the unified table
-    print("\n--- Unified Analysis ---")
-    # Format the DataFrame nicely for display
+    df_grouped = pd.concat([df_grouped, pd.DataFrame([summary])], ignore_index=True)
+
+    # --- Print the final grouped table ---
+    print("\n--- Unified Analysis (Tasks Combined) ---")
     pd.set_option('display.max_rows', None)
     pd.set_option('display.max_columns', None)
     pd.set_option('display.width', 200)
-    pd.set_option('display.float_format', lambda x: f"{x:.6f}" if x < 0.01 else f"{x:.4f}")
-    print(df.to_string(index=False))
-    
-    # Also separately print tool usage summary since it might be useful
-    tool_counter = Counter()
-    for block in blocks:
-        if block.action:
-            tool = extract_tool_name(block.action)
-            if tool:  # Only count non-empty tool names
-                tool_counter[tool] += 1
-    
-    print("\n--- Tool Usage Summary ---")
-    if tool_counter:
-        for tool, count in sorted(tool_counter.items(), key=lambda x: x[1], reverse=True):
-            print(f"Tool: {tool:30} | Times Used: {count}")
+    pd.set_option('display.max_colwidth', 40) # Keep truncation consistent
+    pd.set_option('display.float_format', lambda x: f"{x:.6f}" if isinstance(x, float) and abs(x) < 0.01 else (f"{x:.4f}" if isinstance(x, float) else x))
+    print(df_grouped.to_string(index=False, justify='left'))
+
+    # --- Print the separate overall tool usage summary ---
+    print("\n--- Overall Tool Usage Summary ---")
+    if overall_tool_counter:
+        for tool, count in sorted(overall_tool_counter.items(), key=lambda x: x[1], reverse=True):
+            # Adjust spacing for alignment
+            print(f"Tool: {tool:35} | Times Used: {count}")
     else:
         print("No tool usage detected.")
-    
-    return df
+
+    return df_grouped # Return the grouped DataFrame

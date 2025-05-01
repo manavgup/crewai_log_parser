@@ -1,8 +1,17 @@
-def extract_token_usage_from_raw_response(raw_text):
+from typing import Dict, Optional
+
+def extract_token_usage_from_raw_response(raw_text: str) -> Optional[Dict[str, int]]:
     """Extract token usage information directly from raw response text using regex.
     
     This function uses multiple approaches to find token usage data in the raw API response
     text, even when the JSON is malformed or incomplete.
+    
+    Args:
+        raw_text: The raw response text from the API call
+        
+    Returns:
+        A dictionary containing prompt_tokens, completion_tokens, and total_tokens,
+        or None if no token information could be found
     """
     import re
     

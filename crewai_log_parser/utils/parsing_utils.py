@@ -22,3 +22,23 @@ def extract_datetime(line: str) -> Optional[str]:
     if match:
         return match.group(1)
     return None
+
+def extract_tool_name(raw_line: str) -> str:
+    """
+    Extract the tool name from a line like:
+    'Tool: Repository Analyzer\\nAction Input: {....}'
+    
+    Keeps only the clean tool name.
+    """
+    # First, make sure it starts with 'Tool: '
+    if not raw_line.startswith("Tool: "):
+        return raw_line.split("\\nAction Input")[0].strip()
+    
+    # Remove 'Tool: ' prefix
+    trimmed = raw_line[len("Tool: "):]
+    
+    # Now split at the first '\nAction Input'
+    if "\\nAction Input" in trimmed:
+        trimmed = trimmed.split("\\nAction Input")[0]
+    
+    return trimmed.strip()
