@@ -89,6 +89,67 @@ Run with raw unfiltered logs (if needed):
 python -m crewai_log_parser.cli /path/to/log_file.log logs/analysis --raw
 ```
 
+## Example Output
+
+When you run the CLI, you will see output similar to the following, including summary tables for task performance, agent performance, tool usage, and a workflow diagram file:
+
+```
+python -m crewai_log_parser.cli /path/to/log_file.log logs/analysis --crewai-config /path/to/config --task-aware --workflow-diagram
+Got 2517 lines from /path/to/log_file.log
+Total LLM calls detected: 36
+Saved detailed LLM input/output to folder: logs/analysis
+
+                                                                Task Performance Analysis                                                                 
+┏━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃             ┃             ┃             ┃             ┃             ┃             ┃             ┃ Avg         ┃             ┃ Total      ┃             ┃
+┃             ┃             ┃             ┃ Total       ┃ Prompt      ┃ Completion  ┃             ┃ Response    ┃             ┃ Token      ┃             ┃
+┃ Task ID     ┃ Agent       ┃ Agent Role  ┃ Tokens      ┃ Tokens      ┃ Tokens      ┃ Cost (USD)  ┃ Time (s)    ┃ Tools Used  ┃ Usage      ┃ Total Cost  ┃
+┡━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
+│ initial_ana │ analysis_ag │ Repository  │ 233114      │ 196764      │ 36350       │ 0.0513246   │ 33.44444444 │ -           │ 233114     │ 0.0513246   │
+│ lysis       │ ent         │ Analyzer &  │             │             │             │             │ 444444      │ Repository  │            │             │
+│             │             │ Strategist  │             │             │             │             │             │ Metrics     │            │             │
+│             │             │             │             │             │             │             │             │ Calculator  │            │             │
+│             │             │             │             │             │             │             │             │ (1)         │            │             │
+│             │             │             │             │             │             │             │             │ - Pattern   │            │             │
+│             │             │             │             │             │             │             │             │ Analyzer    │            │             │
+│             │             │             │             │             │             │             │             │ (1)         │            │             │
+│             │             │             │             │             │             │             │             │ - Batch     │            │             │
+│             │             │             │             │             │             │             │             │ Splitter    │            │             │
+│             │             │             │             │             │             │             │             │ Tool (1)    │            │             │
+│             │             │             │             │             │             │             │             │ - Batch     │            │             │
+│             │             │             │             │             │             │             │             │ Processor   │            │             │
+│             │             │             │             │             │             │             │             │ Tool (1)    │            │             │
+│             │             │             │             │             │             │             │             │ - Group     │            │             │
+│             │             │             │             │             │             │             │             │ Merging     │            │             │
+│             │             │             │             │             │             │             │             │ Tool (1)    │            │             │
+│             │             │             │             │             │             │             │             │ - Group     │            │             │
+│             │             │             │             │             │             │             │             │ Refiner     │            │             │
+│             │             │             │             │             │             │             │             │ Tool (1)    │            │             │
+├─────────────┼─────────────┼─────────────┼─────────────┼─────────────┼─────────────┼─────────────┼─────────────┼─────────────┼────────────┼─────────────┤
+│ ...         │ ...         │ ...         │ ...         │ ...         │ ...         │ ...         │ ...         │ ...         │ ...        │ ...         │
+│ TOTALS      │             │             │ 371274      │ 308497      │ 62777       │ 0.08394075  │             │             │ 371274     │ 0.08394075  │
+└─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴────────────┴─────────────┘
+
+                                                         Agent Performance Analysis                                                         
+┏━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ Agent ID              ┃ Agent Role                        ┃ Unique Tasks ┃ Total Tokens ┃ Prompt Tokens ┃ Completion Tokens ┃ Cost (USD) ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ analysis_agent        │ Repository Analyzer & Strategist  │ 3            │ 205421       │ 168027        │ 37394             │ 0.04764045 │
+│ ...                   │ ...                               │ ...          │ ...          │ ...           │ ...               │ ...        │
+│ TOTALS                │                                   │              │ 350562       │ 290582        │ 59980             │ 0.0795753  │
+└───────────────────────┴───────────────────────────────────┴──────────────┴──────────────┴───────────────┴───────────────────┴────────────┘
+
+             Tool Usage Analysis              
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ Tool                          ┃ Times Used ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ Repository Analyzer           │ 1          │
+│ ...                           │ ...        │
+└───────────────────────────────┴────────────┘
+
+Workflow diagram saved to: logs/analysis/workflow_diagram.md
+```
+
 ## Folder Structure
 
 ```
